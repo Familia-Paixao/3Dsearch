@@ -603,36 +603,71 @@ mp.addEventListener('touchend', e => {
 ══════════════════════════════════════════════ */
 const canvas = document.getElementById('c');
 const viewEl = document.getElementById('view');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x07090d);
-scene.fog = new THREE.FogExp2(0x07090d, 0.07);
 
-const camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
-camera.position.set(0, 0.3, 5.6);
-camera.lookAt(0, 0.2, 0);
+// WebGL availability check
+function webGLAvailable() {
+  try {
+    const t = document.createElement('canvas');
+    return !!(window.WebGLRenderingContext && (t.getContext('webgl') || t.getContext('experimental-webgl')));
+  } catch(e) { return false; }
+}
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.35));
-const sun = new THREE.DirectionalLight(0xffffff, 0.85);
-sun.position.set(4, 6, 4); scene.add(sun);
-const rim = new THREE.DirectionalLight(0x60a5fa, 0.22);
-rim.position.set(-4, 2, -4); scene.add(rim);
-const fill = new THREE.PointLight(0xc084fc, 0.35, 14);
-fill.position.set(-2, 1, 3); scene.add(fill);
-scene.add(Object.assign(new THREE.GridHelper(12, 24, 0x111820, 0x111820), { position: { x:0, y:-1.85, z:0 } }));
+if (!webGLAvailable()) {
+  viewEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7690;font-size:13px;text-align:center;padding:20px;">WebGL não disponível neste dispositivo.<br>O restante do app funciona normalmente.</div>';
+}
 
-const group = new THREE.Group();
-scene.add(group);
+// Guard: if THREE didn't load (CDN blocked), define a stub so the rest of the code doesn't crash
+if (typeof THREE === 'undefined') {
+  viewEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7690;font-size:13px;text-align:center;padding:20px;">Visualização 3D indisponível (CDN bloqueada).<br>Todas as outras abas funcionam normalmente.</div>';
+  window.THREE = {};
+}
+
+let renderer, scene, camera, group, skull, fill, fontMesh, ringMesh, ringMat, arrowGrp, expSkull, sutureLines = [];
+
+function init3D() {
+  if (!THREE.WebGLRenderer) return;
+
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'default' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x07090d);
+  scene.fog = new THREE.FogExp2(0x07090d, 0.07);
+
+  camera = new THREE.PerspectiveCamera(44, 1, 0.1, 100);
+  camera.position.set(0, 0.3, 5.6);
+  camera.lookAt(0, 0.2, 0);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+  sun.position.set(4, 6, 4); scene.add(sun);
+  const rim = new THREE.DirectionalLight(0x60a5fa, 0.22);
+  rim.position.set(-4, 2, -4); scene.add(rim);
+  fill = new THREE.PointLight(0xc084fc, 0.35, 14);
+  fill.position.set(-2, 1, 3); scene.add(fill);
+  const grid = new THREE.GridHelper(12, 24, 0x111820, 0x111820);
+  grid.position.y = -1.85; scene.add(grid);
+
+  group = new THREE.Group();
+  scene.add(group);
+
+  resize3D();
+}
 
 function mkMesh(sx,sy,sz,col,op,wire=false) {
   const m = new THREE.MeshPhongMaterial({ color:col, transparent:true, opacity:op, wireframe:wire, side:THREE.DoubleSide, shininess:wire?0:25 });
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(1,64,48), m);
   mesh.scale.set(sx,sy,sz); return mesh;
 }
-const skull = mkMesh(1.0,1.15,1.1,0x7c6bb0,0.20); group.add(skull);
-group.add(mkMesh(1.01,1.155,1.105,0x3a2f70,0.14,true));
-group.add(mkMesh(0.86,1.0,0.94,0x9f7fff,0.05));
+function build3DScene() {
+  if (!group) return;
+  skull = mkMesh(1.0,1.15,1.1,0x7c6bb0,0.20); group.add(skull);
+  group.add(mkMesh(1.01,1.155,1.105,0x3a2f70,0.14,true));
+  group.add(mkMesh(0.86,1.0,0.94,0x9f7fff,0.05));
+  buildLabels();
+  buildSutures();
+  buildFontanela();
+  buildExtras();
+}
 
 function textSprite(text, color, scale=1.1) {
   const c = document.createElement('canvas');
@@ -652,14 +687,15 @@ function textSprite(text, color, scale=1.1) {
   return sp;
 }
 
-[['▲  FRENTE','#60a5fa',0,-0.65,1.28,1.1],['▼  TRÁS','#4ade80',0,-0.65,-1.28,1.1],
- ['DIR →','#fbbf24',1.35,-0.65,0,0.75],['← ESQ','#fbbf24',-1.35,-0.65,0,0.75]
-].forEach(([t,c,x,y,z,s]) => { const sp=textSprite(t,c,s); sp.position.set(x,y,z); group.add(sp); });
-
-const noseDot = new THREE.Mesh(new THREE.SphereGeometry(0.042,12,12), new THREE.MeshBasicMaterial({color:0x60a5fa}));
-noseDot.position.set(0,-0.15,1.12); group.add(noseDot);
-const occDot = new THREE.Mesh(new THREE.SphereGeometry(0.042,12,12), new THREE.MeshBasicMaterial({color:0x4ade80}));
-occDot.position.set(0,0,-1.12); group.add(occDot);
+function buildLabels() {
+  [['▲  FRENTE','#60a5fa',0,-0.65,1.28,1.1],['▼  TRÁS','#4ade80',0,-0.65,-1.28,1.1],
+   ['DIR →','#fbbf24',1.35,-0.65,0,0.75],['← ESQ','#fbbf24',-1.35,-0.65,0,0.75]
+  ].forEach(([t,c,x,y,z,s]) => { const sp=textSprite(t,c,s); sp.position.set(x,y,z); group.add(sp); });
+  const noseDot = new THREE.Mesh(new THREE.SphereGeometry(0.042,12,12), new THREE.MeshBasicMaterial({color:0x60a5fa}));
+  noseDot.position.set(0,-0.15,1.12); group.add(noseDot);
+  const occDot = new THREE.Mesh(new THREE.SphereGeometry(0.042,12,12), new THREE.MeshBasicMaterial({color:0x4ade80}));
+  occDot.position.set(0,0,-1.12); group.add(occDot);
+}
 
 const OPEN=0x4ade80, CLOSED=0xf87171, WARN=0xfbbf24;
 const SUTURES=[
@@ -701,38 +737,42 @@ function mkLine(pts,color,dashed=false) {
   return line;
 }
 
-const sutureLines=[];
-SUTURES.forEach(s=>{
-  const line=mkLine(s.pts.map(([t,p])=>sphPt(t,p)),s.color,s.dashed);
-  line.userData=s; group.add(line); sutureLines.push(line);
-});
+function buildSutures() {
+  SUTURES.forEach(s=>{
+    const line=mkLine(s.pts.map(([t,p])=>sphPt(t,p)),s.color,s.dashed);
+    line.userData=s; group.add(line); sutureLines.push(line);
+  });
+}
 
-const fontPos=sphPt(0,15,1.04);
-const fontMesh=new THREE.Mesh(new THREE.SphereGeometry(.06,16,16),new THREE.MeshPhongMaterial({color:WARN,emissive:WARN,emissiveIntensity:.5}));
-fontMesh.position.copy(fontPos);
-fontMesh.userData={name:'Fontanela Anterior ("Molinho")',meta:'Fechada precocemente — normal seria 12–18 meses',status:'warn',
-  closure:'Normal: 12–18 meses · Lua: fechada aos 8m ⚠',
-  desc:'Maior fontanela, no bregma. Onde suturas metópica, sagital e coronais se encontram. Permite expansão rápida do cérebro no 1º ano. Fechamento antes dos 12m é precoce — a TC vai determinar a causa.'};
-group.add(fontMesh);
+function buildFontanela() {
+  const fontPos=sphPt(0,15,1.04);
+  fontMesh=new THREE.Mesh(new THREE.SphereGeometry(.06,16,16),new THREE.MeshPhongMaterial({color:WARN,emissive:WARN,emissiveIntensity:.5}));
+  fontMesh.position.copy(fontPos);
+  fontMesh.userData={name:'Fontanela Anterior ("Molinho")',meta:'Fechada precocemente — normal seria 12–18 meses',status:'warn',
+    closure:'Normal: 12–18 meses · Lua: fechada aos 8m ⚠',
+    desc:'Maior fontanela, no bregma. Onde suturas metópica, sagital e coronais se encontram. Permite expansão rápida do cérebro no 1º ano. Fechamento antes dos 12m é precoce — a TC vai determinar a causa.'};
+  group.add(fontMesh);
+  ringMat=new THREE.MeshBasicMaterial({color:WARN,transparent:true,opacity:.5,side:THREE.DoubleSide});
+  ringMesh=new THREE.Mesh(new THREE.RingGeometry(.08,.12,20),ringMat);
+  ringMesh.position.copy(fontPos); ringMesh.lookAt(new THREE.Vector3(0,8,8)); group.add(ringMesh);
+}
 
-const ringMat=new THREE.MeshBasicMaterial({color:WARN,transparent:true,opacity:.5,side:THREE.DoubleSide});
-const ringMesh=new THREE.Mesh(new THREE.RingGeometry(.08,.12,20),ringMat);
-ringMesh.position.copy(fontPos); ringMesh.lookAt(new THREE.Vector3(0,8,8)); group.add(ringMesh);
-
-const arrowGrp=new THREE.Group(); arrowGrp.visible=false; group.add(arrowGrp);
-[[new THREE.Vector3(.85,.2,0),new THREE.Vector3(1.55,.2,0)],[new THREE.Vector3(-.85,.2,0),new THREE.Vector3(-1.55,.2,0)],
- [new THREE.Vector3(0,.05,-.95),new THREE.Vector3(0,.05,-1.65)],[new THREE.Vector3(.5,.95,0),new THREE.Vector3(.82,1.6,0)],
- [new THREE.Vector3(-.5,.95,0),new THREE.Vector3(-.82,1.6,0)]
-].forEach(([f,t])=>{ const d=t.clone().sub(f).normalize(); arrowGrp.add(new THREE.ArrowHelper(d,f,f.distanceTo(t),OPEN,.14,.08)); });
-arrowGrp.add(new THREE.ArrowHelper(new THREE.Vector3(0,0,1),new THREE.Vector3(0,.5,.8),.55,CLOSED,.14,.08));
-
-const expSkull=mkMesh(1.1,1.22,1.18,0x60a5fa,0.10); expSkull.visible=false; group.add(expSkull);
+function buildExtras() {
+  arrowGrp=new THREE.Group(); arrowGrp.visible=false; group.add(arrowGrp);
+  [[new THREE.Vector3(.85,.2,0),new THREE.Vector3(1.55,.2,0)],[new THREE.Vector3(-.85,.2,0),new THREE.Vector3(-1.55,.2,0)],
+   [new THREE.Vector3(0,.05,-.95),new THREE.Vector3(0,.05,-1.65)],[new THREE.Vector3(.5,.95,0),new THREE.Vector3(.82,1.6,0)],
+   [new THREE.Vector3(-.5,.95,0),new THREE.Vector3(-.82,1.6,0)]
+  ].forEach(([f,t])=>{ const d=t.clone().sub(f).normalize(); arrowGrp.add(new THREE.ArrowHelper(d,f,f.distanceTo(t),OPEN,.14,.08)); });
+  arrowGrp.add(new THREE.ArrowHelper(new THREE.Vector3(0,0,1),new THREE.Vector3(0,.5,.8),.55,CLOSED,.14,.08));
+  expSkull=mkMesh(1.1,1.22,1.18,0x60a5fa,0.10); expSkull.visible=false; group.add(expSkull);
+}
 
 // Raycaster
-const raycaster=new THREE.Raycaster(); raycaster.params.Line.threshold=0.05;
+const raycaster=new THREE.Raycaster(); raycaster.params.Line={threshold:0.05};
 const mouse=new THREE.Vector2();
-const interactables=[...sutureLines,fontMesh];
 const tt=document.getElementById('tt');
+
+function getInteractables() { return [...sutureLines, ...(fontMesh?[fontMesh]:[])] ; }
 
 function showTT(obj) {
   const d=obj.userData;
@@ -761,7 +801,7 @@ canvas.addEventListener('mousemove',e=>{
     rotX=Math.max(-1.3,Math.min(1.3,rotX)); px=e.clientX; py=e.clientY; hideTT();
   } else {
     raycaster.setFromCamera(mouse,camera);
-    const hits=raycaster.intersectObjects(interactables,false);
+    const hits=raycaster.intersectObjects(getInteractables(),false);
     if(hits.length){showTT(hits[0].object);canvas.style.cursor='pointer';}
     else{hideTT();canvas.style.cursor='grab';}
   }
@@ -796,35 +836,39 @@ canvas.addEventListener('click',e=>{
   const r=canvas.getBoundingClientRect();
   mouse.x=((e.clientX-r.left)/r.width)*2-1;
   mouse.y=-((e.clientY-r.top)/r.height)*2+1;
+  if(!raycaster||!camera)return;
   raycaster.setFromCamera(mouse,camera);
-  const hits=raycaster.intersectObjects(interactables,false);
+  const hits=raycaster.intersectObjects(getInteractables(),false);
   if(hits.length) showTT(hits[0].object);
   else hideTT();
 });
 
 window.setScen=function(n,btn){
   document.querySelectorAll('.sb').forEach(b=>b.classList.remove('on')); btn.classList.add('on');
-  arrowGrp.visible=n===1; expSkull.visible=n===2;
-  skull.material.opacity=n===2?.12:.20;
-  skull.material.color.setHex(n===2?0x1a5080:0x7c6bb0);
+  if(!group)return;
+  if(arrowGrp) arrowGrp.visible=n===1;
+  if(expSkull) expSkull.visible=n===2;
+  if(skull){ skull.material.opacity=n===2?.12:.20; skull.material.color.setHex(n===2?0x1a5080:0x7c6bb0); }
   sutureLines.forEach(l=>{const d=l.userData;l.material.color.setHex(n===1&&d.status==='aberta'?0x86efac:d.color);});
 };
 
-function resize(){
-  const w=viewEl.clientWidth, h=viewEl.clientHeight;
+function resize3D(){
+  if(!renderer||!camera)return;
+  const w=viewEl.clientWidth||window.innerWidth, h=viewEl.clientHeight||400;
   renderer.setSize(w,h); camera.aspect=w/h; camera.updateProjectionMatrix();
 }
-resize(); new ResizeObserver(resize).observe(viewEl);
+new ResizeObserver(resize3D).observe(viewEl);
 
 let T=0;
 function animate(){
   requestAnimationFrame(animate); T+=.016;
+  if(!renderer||!scene||!camera||!group)return;
   group.rotation.x=rotX; group.rotation.y=rotY+(drag?0:T*.0025);
   camera.position.z=zoom;
-  const p=.88+.12*Math.sin(T*2.8);
-  fontMesh.scale.setScalar(p); ringMesh.scale.setScalar(.9+.2*Math.sin(T*2.8));
-  ringMat.opacity=.22+.32*Math.sin(T*2.8);
-  fill.position.set(-2+Math.sin(T*.4)*.5,1,3+Math.cos(T*.4)*.4);
+  if(fontMesh){ const p=.88+.12*Math.sin(T*2.8); fontMesh.scale.setScalar(p); }
+  if(ringMesh){ ringMesh.scale.setScalar(.9+.2*Math.sin(T*2.8)); }
+  if(ringMat){ ringMat.opacity=.22+.32*Math.sin(T*2.8); }
+  if(fill){ fill.position.set(-2+Math.sin(T*.4)*.5,1,3+Math.cos(T*.4)*.4); }
   renderer.render(scene,camera);
 }
 
@@ -833,7 +877,23 @@ function animate(){
 ══════════════════════════════════════════════ */
 initJournal();
 renderPanel(0, document.getElementById('desktop-panel-body'));
-animate();
+
+// Defer 3D init to after layout is painted
+window.addEventListener('load', () => {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      try {
+        init3D();
+        build3DScene();
+        resize3D();
+        animate();
+      } catch(e) {
+        console.error('3D init failed:', e);
+        viewEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7690;font-size:13px;text-align:center;padding:20px;">Visualização 3D indisponível.<br>Todas as outras abas funcionam normalmente.</div>';
+      }
+    });
+  });
+});
 </script>
 </body>
 </html>
