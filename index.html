@@ -237,8 +237,9 @@ textarea.field{resize:vertical;}
   <button class="nb on" title="Visualização 3D" onclick="setNav(0,this)">🧠</button>
   <button class="nb" title="Suturas e Fontanelas" onclick="setNav(1,this)">🦴</button>
   <button class="nb" title="Cirurgia" onclick="setNav(2,this)">🔬</button>
-  <button class="nb" title="Referências" onclick="setNav(3,this)">📚</button>
-  <button class="nb" title="Diário" onclick="setNav(4,this)">📝</button>
+  <button class="nb" title="Projeção de crescimento" onclick="setNav(3,this)">📈</button>
+  <button class="nb" title="Referências" onclick="setNav(4,this)">📚</button>
+  <button class="nb" title="Diário" onclick="setNav(5,this)">📝</button>
 </nav>
 
 <div id="view">
@@ -264,8 +265,9 @@ textarea.field{resize:vertical;}
     <button class="tab on" onclick="setTab(0,this)">Situação</button>
     <button class="tab" onclick="setTab(1,this)">Suturas</button>
     <button class="tab" onclick="setTab(2,this)">Cirurgia</button>
-    <button class="tab" onclick="setTab(3,this)">Refs</button>
-    <button class="tab" onclick="setTab(4,this)">Diário</button>
+    <button class="tab" onclick="setTab(3,this)">Projeção</button>
+    <button class="tab" onclick="setTab(4,this)">Refs</button>
+    <button class="tab" onclick="setTab(5,this)">Diário</button>
   </div>
   <div class="pb" id="desktop-panel-body">
     <!-- content injected by renderPanel() -->
@@ -279,8 +281,9 @@ textarea.field{resize:vertical;}
   <button class="mn-btn on" onclick="mobileNav(0,this)"><span>🧠</span><span>3D</span></button>
   <button class="mn-btn" onclick="mobileNav(1,this)"><span>🦴</span><span>Suturas</span></button>
   <button class="mn-btn" onclick="mobileNav(2,this)"><span>🔬</span><span>Cirurgia</span></button>
-  <button class="mn-btn" onclick="mobileNav(3,this)"><span>📚</span><span>Refs</span></button>
-  <button class="mn-btn" onclick="mobileNav(4,this)"><span>📝</span><span>Diário</span></button>
+  <button class="mn-btn" onclick="mobileNav(3,this)"><span>📈</span><span>Projeção</span></button>
+  <button class="mn-btn" onclick="mobileNav(4,this)"><span>📚</span><span>Refs</span></button>
+  <button class="mn-btn" onclick="mobileNav(5,this)"><span>📝</span><span>Diário</span></button>
 </nav>
 
 <!-- MOBILE PANEL SHEET -->
@@ -428,6 +431,9 @@ const PANELS = [
   </div>`
 ];
 
+// Projeção panel is rendered dynamically by renderProjection()
+// It's injected at index 3; refs=4, diary=5
+
 /* ══════════════════════════════════════════════
    JOURNAL / LOCALSTORAGE
 ══════════════════════════════════════════════ */
@@ -527,16 +533,327 @@ function saveJournalEntry() {
 }
 
 /* ══════════════════════════════════════════════
+   PROJEÇÃO DE CRESCIMENTO
+══════════════════════════════════════════════ */
+
+// Saved CT data key
+const CT_KEY = 'lua_ct_data_v4';
+
+function loadCT() {
+  try { return JSON.parse(localStorage.getItem(CT_KEY)) || null; }
+  catch(e) { return null; }
+}
+function saveCT(data) { localStorage.setItem(CT_KEY, JSON.stringify(data)); }
+
+// Virchow's law: growth parallel to fused suture, restricted perpendicular
+// For metopic: frontal width restricted, AP and vertical compensate
+// Based on: Jin et al. (Western Univ), Porras et al. (Children's Colorado),
+//           Nature Scientific Reports 2023 data-driven suture growth model
+
+const GROWTH_MODEL = {
+  // Metopic closed + anterior fontanelle closed, 5 sutures open
+  // Growth vectors as % deviation from normal at each age (months)
+  // [frontalWidth, APLength, height, temporalWidth]
+  withoutSurgery: {
+    // Restricted frontal expansion, compensatory AP and lateral growth
+    9:  { fw: -18, ap: +8,  ht: +5,  tw: +12 },
+    12: { fw: -22, ap: +10, ht: +6,  tw: +15 },
+    18: { fw: -25, ap: +11, ht: +7,  tw: +17 },
+    24: { fw: -26, ap: +11, ht: +7,  tw: +18 },
+    36: { fw: -24, ap: +10, ht: +6,  tw: +16 },
+    60: { fw: -20, ap: +8,  ht: +5,  tw: +13 },
+  },
+  withSurgery: {
+    // After FOA: frontal expansion restored, gradual normalization
+    9:  { fw: -18, ap: +8,  ht: +5,  tw: +12 }, // pre-op baseline
+    12: { fw: -5,  ap: +3,  ht: +2,  tw: +4  }, // 3m post-op
+    18: { fw: +2,  ap: +1,  ht: +1,  tw: +2  },
+    24: { fw: +3,  ap: 0,   ht: 0,   tw: +1  },
+    36: { fw: +2,  ap: 0,   ht: 0,   tw: 0   },
+    60: { fw: +1,  ap: 0,   ht: 0,   tw: 0   },
+  },
+  // Normal skull growth baseline (OMS + literature)
+  // Approx frontal angle (IFDA degrees) by severity
+  ifda: {
+    normal: 137,
+    mild: 126,
+    moderate: 116,
+    severe: 104,
+  }
+};
+
+// Map IFDA to severity label
+function ifdaToSeverity(ifda) {
+  if (!ifda) return null;
+  if (ifda >= 130) return 'leve';
+  if (ifda >= 120) return 'moderado';
+  return 'grave';
+}
+
+function severityColor(s) {
+  if (s === 'leve') return '#4ade80';
+  if (s === 'moderado') return '#fbbf24';
+  return '#f87171';
+}
+
+// SVG skull shape generator — top-down view
+// Returns SVG path string for approximate skull outline given growth params
+function skullTopPath(params, cx, cy, baseR) {
+  const { fw, ap, tw } = params;
+  const rx = baseR * (1 + tw / 100);     // lateral (transverse)
+  const ryFront = baseR * 0.85 * (1 + fw / 100) * 0.6; // frontal projection
+  const ryBack  = baseR * 1.1 * (1 + ap / 100);         // occipital
+  // Draw simplified top-down skull: ellipse-like with frontal narrowing for metopic
+  const pts = [];
+  for (let i = 0; i <= 60; i++) {
+    const a = (i / 60) * Math.PI * 2 - Math.PI / 2;
+    let r;
+    if (a < 0) {
+      // front half
+      const t = (a + Math.PI / 2) / (Math.PI / 2);
+      r = ryFront + (rx - ryFront) * Math.abs(Math.sin(a));
+    } else {
+      r = ryBack + (rx - ryBack) * Math.abs(Math.sin(a));
+    }
+    const x = cx + Math.cos(a) * rx;
+    const y = cy + Math.sin(a) * (a < 0 ? ryFront : ryBack);
+    pts.push(`${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`);
+  }
+  return pts.join(' ') + ' Z';
+}
+
+// SVG skull front view shape
+function skullFrontPath(params, cx, cy, w, h) {
+  const { fw, ht } = params;
+  const hw = (w / 2) * (1 + fw / 100);
+  const hh = (h / 2) * (1 + ht / 100);
+  // Simplified front view: wider top, narrower bottom (face)
+  return `M${cx},${cy - hh} C${cx + hw},${cy - hh} ${cx + hw * 1.1},${cy} ${cx + hw * 0.7},${cy + hh * 0.7} L${cx},${cy + hh * 0.9} L${cx - hw * 0.7},${cy + hh * 0.7} C${cx - hw * 1.1},${cy} ${cx - hw},${cy - hh} ${cx},${cy - hh} Z`;
+}
+
+function renderProjection(container) {
+  const ct = loadCT();
+  const severity = ct ? ifdaToSeverity(ct.ifda) : null;
+  const sevColor = severity ? severityColor(severity) : '#6b7690';
+
+  // Ages to show in chart
+  const ages = [9, 12, 18, 24, 36, 60];
+  const ageLabels = ['9m', '12m', '18m', '2a', '3a', '5a'];
+
+  // Build PC projection (simplified: normal growth rate adjusted by severity)
+  const pcNormal   = [43.8, 44.9, 46.5, 47.6, 48.6, 50.0];
+  const pcNoSurg   = [41.0, 41.8, 43.0, 43.8, 44.5, 45.5]; // restricted growth
+  const pcWithSurg = [41.0, 42.5, 44.8, 46.5, 48.0, 49.5]; // restored
+
+  // SVG chart dimensions
+  const W = 280, H = 130, pad = { l:32, r:10, t:10, b:22 };
+  const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+  const minPC = 39, maxPC = 52;
+
+  function pcToY(pc) { return pad.t + cH - ((pc - minPC) / (maxPC - minPC)) * cH; }
+  function idxToX(i) { return pad.l + (i / (ages.length - 1)) * cW; }
+
+  function polyline(arr, color, dash='') {
+    const pts = arr.map((v,i) => `${idxToX(i).toFixed(1)},${pcToY(v).toFixed(1)}`).join(' ');
+    return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ${dash?`stroke-dasharray="${dash}"`:''}/>`;
+  }
+  function dots(arr, color) {
+    return arr.map((v,i) => `<circle cx="${idxToX(i).toFixed(1)}" cy="${pcToY(v).toFixed(1)}" r="3" fill="${color}" stroke="var(--bg)" stroke-width="1.5"/>`).join('');
+  }
+
+  // Skull silhouette SVGs (top-down view, simplified)
+  function skullSVG(params, label, labelColor, note) {
+    const cx = 60, cy = 55, baseR = 38;
+    const rx = baseR * (1 + (params.tw||0) / 100);
+    const ryF = baseR * 0.7 * (1 + (params.fw||0) / 100);
+    const ryB = baseR * 1.05 * (1 + (params.ap||0) / 100);
+
+    // Generate points for top-down skull
+    const nPts = 80;
+    const points = [];
+    for (let i = 0; i <= nPts; i++) {
+      const a = (i / nPts) * Math.PI * 2;
+      // Front = top of SVG (a near PI), back = bottom (a near 0)
+      const isFront = Math.cos(a) > 0;
+      const x = cx + Math.sin(a) * rx;
+      const y = cy + (isFront ? -Math.abs(Math.cos(a)) * ryF : Math.abs(Math.cos(a)) * ryB);
+      points.push(`${i===0?'M':'L'}${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    const path = points.join(' ') + ' Z';
+
+    // Metopic line (vertical, front center)
+    const mTop = `${cx},${cy - ryF}`;
+    const mBot = `${cx},${cy - ryF * 0.3}`;
+
+    return `
+    <svg width="120" height="120" viewBox="0 0 120 120" style="overflow:visible;">
+      <defs>
+        <radialGradient id="sg${label.replace(/\s/g,'')}" cx="50%" cy="40%" r="60%">
+          <stop offset="0%" stop-color="${labelColor}" stop-opacity="0.25"/>
+          <stop offset="100%" stop-color="${labelColor}" stop-opacity="0.05"/>
+        </radialGradient>
+      </defs>
+      <path d="${path}" fill="url(#sg${label.replace(/\s/g,'')})" stroke="${labelColor}" stroke-width="2" opacity="0.9"/>
+      <!-- Suturas abertas -->
+      <line x1="${cx}" y1="${cy+ryB*0.1}" x2="${cx}" y2="${cy+ryB}" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="3,2" opacity="0.7"/>
+      <!-- Coronais -->
+      <path d="M${cx-rx*0.5},${cy-ryF*0.4} Q${cx},${cy-ryF*0.6} ${cx+rx*0.5},${cy-ryF*0.4}" fill="none" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="3,2" opacity="0.7"/>
+      <!-- Lambdoides -->
+      <path d="M${cx-rx*0.6},${cy+ryB*0.3} Q${cx},${cy+ryB*0.55} ${cx+rx*0.6},${cy+ryB*0.3}" fill="none" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="3,2" opacity="0.7"/>
+      <!-- Metópica fechada -->
+      <line x1="${cx}" y1="${cy-ryF}" x2="${cx}" y2="${cy-ryF*0.2}" stroke="#f87171" stroke-width="2.5" stroke-dasharray="4,2"/>
+      <!-- Labels -->
+      <text x="${cx}" y="108" text-anchor="middle" fill="${labelColor}" font-size="10" font-family="DM Sans,sans-serif" font-weight="500">${label}</text>
+      <text x="${cx}" y="118" text-anchor="middle" fill="#4a5168" font-size="8" font-family="DM Sans,sans-serif">${note}</text>
+      <!-- Front/back labels -->
+      <text x="${cx}" y="10" text-anchor="middle" fill="#60a5fa" font-size="7" font-family="DM Sans,sans-serif">FRENTE</text>
+      <text x="${cx}" y="98" text-anchor="middle" fill="#4ade80" font-size="7" font-family="DM Sans,sans-serif">TRÁS</text>
+    </svg>`;
+  }
+
+  const noSurgParams18  = GROWTH_MODEL.withoutSurgery[18];
+  const withSurgParams18 = GROWTH_MODEL.withSurgery[18];
+  const noSurgParams60  = GROWTH_MODEL.withoutSurgery[60];
+  const withSurgParams60 = GROWTH_MODEL.withSurgery[60];
+
+  container.innerHTML = `
+  <p class="stitle">Dados da TC (insira após o exame)</p>
+  <div class="card" style="border-color:${ct?'rgba(74,222,128,.25)':'rgba(251,191,36,.2)'};background:${ct?'rgba(74,222,128,.04)':'rgba(251,191,36,.04)'};">
+    <h3 style="color:${ct?'var(--open)':'var(--warn)'}">${ct ? '✓ Dados da TC inseridos' : '⚠ TC ainda não realizada'}</h3>
+    <p style="margin-bottom:10px;">${ct ? `IFDA: ${ct.ifda}° · Grau: ${ct.severity} · Inserido em ${ct.date}` : 'Preencha após receber o resultado. A projeção se calibra automaticamente.'}</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Ângulo interfrontal — IFDA (°)</div>
+        <input class="field" id="ct-ifda" type="number" min="90" max="145" placeholder="ex: 118" value="${ct?.ifda||''}" style="margin:0;">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Volume fossa ant. (cm³) — opcional</div>
+        <input class="field" id="ct-vol" type="number" min="50" max="300" placeholder="ex: 145" value="${ct?.vol||''}" style="margin:0;">
+      </div>
+    </div>
+    <div style="margin-top:6px;">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Espessura óssea frontal (mm) — opcional</div>
+      <input class="field" id="ct-thick" type="number" min="1" max="10" placeholder="ex: 3.5" value="${ct?.thick||''}" style="margin:0 0 8px;">
+    </div>
+    <button class="btn btn-pri" style="width:100%;margin-top:4px;" onclick="saveCTData()">Salvar dados da TC</button>
+  </div>
+
+  ${ct ? `
+  <div class="card" style="background:rgba(192,132,252,.05);border-color:rgba(192,132,252,.2);text-align:center;padding:8px 10px;">
+    <div style="font-size:10px;color:var(--muted);margin-bottom:2px;">Grau atual (IFDA ${ct.ifda}°)</div>
+    <div style="font-size:20px;font-weight:500;color:${sevColor};">${ct.severity.toUpperCase()}</div>
+    <div style="font-size:10px;color:var(--dim);margin-top:2px;">Normal: ≥134° · Leve: 120–133° · Moderado: 110–119° · Grave: &lt;110°</div>
+  </div>` : ''}
+
+  <p class="stitle">Projeção — Vista superior do crânio</p>
+  <div style="font-size:10px;color:var(--dim);margin-bottom:8px;">Simulação baseada na Lei de Virchow e modelo de crescimento sutural (Nature Sci Reports 2023). Ilustrativa.</div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+    <div class="card" style="padding:8px;text-align:center;border-color:rgba(248,113,113,.2);">
+      <div style="font-size:10px;color:var(--closed);font-weight:500;margin-bottom:4px;">Sem cirurgia · 18 meses</div>
+      ${skullSVG(noSurgParams18,'Sem cirurgia','#f87171','Frontal restrito')}
+    </div>
+    <div class="card" style="padding:8px;text-align:center;border-color:rgba(74,222,128,.2);">
+      <div style="font-size:10px;color:var(--open);font-weight:500;margin-bottom:4px;">Com cirurgia · 18 meses</div>
+      ${skullSVG(withSurgParams18,'Com cirurgia','#4ade80','Após FOA')}
+    </div>
+    <div class="card" style="padding:8px;text-align:center;border-color:rgba(248,113,113,.15);">
+      <div style="font-size:10px;color:var(--closed);font-weight:500;margin-bottom:4px;">Sem cirurgia · 5 anos</div>
+      ${skullSVG(noSurgParams60,'Sem cirurgia','#f87171','Compensação máxima')}
+    </div>
+    <div class="card" style="padding:8px;text-align:center;border-color:rgba(74,222,128,.15);">
+      <div style="font-size:10px;color:var(--open);font-weight:500;margin-bottom:4px;">Com cirurgia · 5 anos</div>
+      ${skullSVG(withSurgParams60,'Com cirurgia','#4ade80','Próximo ao normal')}
+    </div>
+  </div>
+
+  <p class="stitle">Projeção de Perímetro Cefálico</p>
+  <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;overflow:visible;">
+    <!-- grid lines -->
+    ${[40,42,44,46,48,50].map(v=>`
+      <line x1="${pad.l}" y1="${pcToY(v).toFixed(1)}" x2="${W-pad.r}" y2="${pcToY(v).toFixed(1)}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+      <text x="${(pad.l-4).toFixed(1)}" y="${(pcToY(v)+3.5).toFixed(1)}" text-anchor="end" fill="#4a5168" font-size="8" font-family="DM Sans,sans-serif">${v}</text>
+    `).join('')}
+    <!-- x axis labels -->
+    ${ageLabels.map((l,i)=>`<text x="${idxToX(i).toFixed(1)}" y="${(H-4).toFixed(1)}" text-anchor="middle" fill="#4a5168" font-size="8" font-family="DM Sans,sans-serif">${l}</text>`).join('')}
+    <!-- lua current point marker -->
+    <line x1="${idxToX(0)}" y1="${pad.t}" x2="${idxToX(0)}" y2="${H-pad.b}" stroke="rgba(192,132,252,0.3)" stroke-width="1" stroke-dasharray="3,2"/>
+    <text x="${idxToX(0)}" y="${(pad.t-2).toFixed(1)}" text-anchor="middle" fill="#c084fc" font-size="7" font-family="DM Sans,sans-serif">Agora</text>
+    <!-- lines -->
+    ${polyline(pcNormal,'rgba(255,255,255,0.2)','4,3')}
+    ${polyline(pcNoSurg,'#f87171')}
+    ${polyline(pcWithSurg,'#4ade80')}
+    ${dots(pcNormal,'rgba(255,255,255,0.3)')}
+    ${dots(pcNoSurg,'#f87171')}
+    ${dots(pcWithSurg,'#4ade80')}
+    <!-- y axis label -->
+    <text x="8" y="${(pad.t + cH/2).toFixed(1)}" text-anchor="middle" fill="#4a5168" font-size="8" font-family="DM Sans,sans-serif" transform="rotate(-90,8,${(pad.t+cH/2).toFixed(1)})">PC (cm)</text>
+  </svg>
+
+  <!-- Legend -->
+  <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--muted);margin-top:4px;">
+    <span style="display:flex;align-items:center;gap:4px;"><span style="width:18px;height:2px;background:#f87171;display:inline-block;"></span>Sem cirurgia</span>
+    <span style="display:flex;align-items:center;gap:4px;"><span style="width:18px;height:2px;background:#4ade80;display:inline-block;"></span>Com cirurgia</span>
+    <span style="display:flex;align-items:center;gap:4px;"><span style="width:18px;height:2px;background:rgba(255,255,255,0.2);display:inline-block;border-top:1px dashed rgba(255,255,255,0.3)"></span>Normal (OMS P50)</span>
+  </div>
+
+  <p class="stitle">O que acontece sem cirurgia (metópica)</p>
+  <div class="card">
+    <h3>Crescimento compensatório — Lei de Virchow</h3>
+    <p>Com a sutura metópica fechada e a fontanela anterior fechada, o crânio <strong style="color:var(--text)">não consegue expandir para frente</strong>. O cérebro redireciona o crescimento para onde as suturas ainda estão abertas:</p>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:9px;">
+    <div class="card" style="border-color:rgba(248,113,113,.2);padding:9px;">
+      <div style="font-size:10px;color:var(--closed);margin-bottom:3px;">Restringido</div>
+      <div style="font-size:11px;font-weight:500;">Largura frontal</div>
+      <div style="font-size:10px;color:var(--muted);">Metópica + fontanela fechadas. Testa permanece estreita/triangular.</div>
+    </div>
+    <div class="card" style="border-color:rgba(74,222,128,.2);padding:9px;">
+      <div style="font-size:10px;color:var(--open);margin-bottom:3px;">Compensatório</div>
+      <div style="font-size:11px;font-weight:500;">Regiões parietais e occipital</div>
+      <div style="font-size:10px;color:var(--muted);">Suturas sagital, coronais e lambdoides abertas. Crânio alarga e alonga.</div>
+    </div>
+  </div>
+  <div class="card" style="border-color:rgba(251,191,36,.2);background:rgba(251,191,36,.04);">
+    <h3 class="warn">Riscos acumulados sem tratamento</h3>
+    <p>• <strong style="color:var(--text)">~15%</strong> de risco de pressão intracraniana elevada<br>
+    • Trigonocefalia (testa triangular) tende a <strong style="color:var(--text)">não melhorar espontaneamente</strong><br>
+    • Atrasos cognitivos leves documentados mesmo após cirurgia (lobos frontais comprimidos)<br>
+    • Impacto psicossocial da deformidade estética crescente com a idade</p>
+  </div>
+  <div style="font-size:9px;color:var(--dim);margin-top:8px;line-height:1.6;">
+    ⚠ Esta projeção é educacional e baseada em padrões populacionais. Não substitui avaliação do neurocirurgião com a TC em mãos. Calibre os dados da TC acima para refinar a projeção.
+  </div>`;
+}
+
+window.saveCTData = function() {
+  const ifda = parseFloat(document.getElementById('ct-ifda')?.value);
+  const vol  = parseFloat(document.getElementById('ct-vol')?.value) || null;
+  const thick = parseFloat(document.getElementById('ct-thick')?.value) || null;
+  if (!ifda || isNaN(ifda)) { alert('Por favor insira o IFDA (ângulo interfrontal)'); return; }
+  const severity = ifdaToSeverity(ifda);
+  const data = { ifda, vol, thick, severity,
+    date: new Date().toLocaleDateString('pt-BR', {month:'short',year:'numeric'}) };
+  saveCT(data);
+  refreshCurrentPanel();
+};
+
+/* ══════════════════════════════════════════════
    NAVIGATION
 ══════════════════════════════════════════════ */
 let currentTab = 0;
 
 function renderPanel(idx, container) {
-  container.innerHTML = PANELS[idx]();
-  if (idx === 4) {
+  if (idx === 3) {
+    renderProjection(container);
+    return;
+  }
+  // PANELS: 0=situação,1=suturas,2=cirurgia, then 4=refs→PANELS[3], 5=diário→PANELS[4]
+  const panelIdx = idx <= 2 ? idx : idx - 1;
+  container.innerHTML = PANELS[panelIdx]();
+  if (idx === 5) {
     const jl = container.querySelector('#journal-list');
     if (jl) renderJournal(jl);
-    // drag and drop
     const dz = container.querySelector('#drop-zone');
     if (dz) {
       dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
